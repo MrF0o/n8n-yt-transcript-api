@@ -4,13 +4,15 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
+    networks:
+      - n8n-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-  networks:
-    n8n-network:
-      external: true
-      name: n8n-docker-caddy_default
 
+networks:
+  n8n-network:
+    external: true
+    name: n8n-docker-caddy_default
