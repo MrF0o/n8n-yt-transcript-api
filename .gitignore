@@ -3,6 +3,10 @@
 *.env
 !.env.example
 
+# Cookies (sensitive - do not commit)
+cookies.txt
+cookies*.txt
+
 # Python
 __pycache__/
 *.py[cod]
