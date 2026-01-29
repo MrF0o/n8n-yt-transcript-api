@@ -3,12 +3,20 @@ import random
 import logging
 import time
 import threading
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from collections import deque
 
 logger = logging.getLogger(__name__)
 
-PROXY_LIST_URL = "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"
+# Multiple proxy sources for better coverage
+PROXY_LIST_URLS = [
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+    "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
+]
+
+# Video ID known to have transcripts - used for validation
+TEST_VIDEO_ID = "dQw4w9WgXcQ"  # Rick Astley - Never Gonna Give You Up
 
 
 class ProxyManager:
@@ -16,10 +24,10 @@ class ProxyManager:
         # Raw proxy list from source
         self.raw_proxies: list[str] = []
         self.last_fetch = 0
-        self.fetch_interval = 3600  # Refresh list every 1 hour
+        self.fetch_interval = 1800  # Refresh list every 30 min (more aggressive)
         
         # Ready-to-use validated proxies (fast access)
-        self.ready_proxies: deque[str] = deque(maxlen=50)
+        self.ready_proxies: deque[str] = deque(maxlen=30)  # Smaller pool, higher quality
         
         # Track failed proxies to avoid retrying them
         self.failed_proxies: set[str] = set()
@@ -28,14 +36,14 @@ class ProxyManager:
         # Background validation
         self.validation_lock = threading.Lock()
         self.is_validating = False
-        self.min_ready_proxies = 10  # Trigger background refresh when below this
+        self.min_ready_proxies = 5  # Trigger background refresh when below this
         
         # Start background worker
         self._stop_event = threading.Event()
         self._worker_thread = threading.Thread(target=self._background_worker, daemon=True)
         self._worker_thread.start()
         
-        logger.info("ProxyManager initialized with background worker")
+        logger.info("ProxyManager initialized with deep transcript validation")
 
     def _background_worker(self):
         """Background thread that keeps the proxy pool filled"""
@@ -62,42 +70,59 @@ class ProxyManager:
                 self._stop_event.wait(timeout=60)
 
     def _fetch_raw_proxies(self) -> bool:
-        """Fetch raw proxy list from source"""
-        try:
-            logger.info("Fetching proxy list from GitHub...")
-            response = requests.get(PROXY_LIST_URL, timeout=15)
-            if response.status_code == 200:
-                lines = response.text.strip().split('\n')
-                self.raw_proxies = [line.strip() for line in lines if line.strip()]
-                self.last_fetch = time.time()
-                # Clear failed proxies on fresh fetch (they might work now)
-                with self.failed_proxies_lock:
-                    self.failed_proxies.clear()
-                logger.info(f"Fetched {len(self.raw_proxies)} proxies")
-                return True
-            else:
-                logger.error(f"Failed to fetch proxies: HTTP {response.status_code}")
-                return False
-        except Exception as e:
-            logger.error(f"Error fetching proxies: {e}")
-            return False
+        """Fetch raw proxy list from multiple sources"""
+        all_proxies = set()
+        
+        for url in PROXY_LIST_URLS:
+            try:
+                logger.info(f"Fetching proxy list from {url}...")
+                response = requests.get(url, timeout=15)
+                if response.status_code == 200:
+                    lines = response.text.strip().split('\n')
+                    proxies = [line.strip() for line in lines if line.strip() and ':' in line]
+                    all_proxies.update(proxies)
+                    logger.info(f"Fetched {len(proxies)} proxies from {url}")
+            except Exception as e:
+                logger.warning(f"Failed to fetch from {url}: {e}")
+        
+        if all_proxies:
+            self.raw_proxies = list(all_proxies)
+            self.last_fetch = time.time()
+            # Clear failed proxies on fresh fetch (they might work now)
+            with self.failed_proxies_lock:
+                self.failed_proxies.clear()
+            logger.info(f"Total unique proxies fetched: {len(self.raw_proxies)}")
+            return True
+        
+        logger.error("Failed to fetch proxies from any source")
+        return False
 
     def _validate_proxy(self, proxy_addr: str) -> bool:
-        """Quick validation - check if proxy responds to YouTube"""
+        """Deep validation - actually test if proxy can fetch YouTube transcripts"""
         proxies = {
             "http": f"http://{proxy_addr}",
             "https": f"http://{proxy_addr}",
         }
         try:
-            # Use HEAD request with short timeout for speed
-            response = requests.head(
-                "https://www.youtube.com",
-                proxies=proxies,
-                timeout=4,
-                allow_redirects=True
+            # Import here to avoid circular imports
+            from youtube_transcript_api import YouTubeTranscriptApi
+            from youtube_transcript_api.proxies import GenericProxyConfig
+            
+            proxy_config = GenericProxyConfig(
+                http_url=proxies['http'],
+                https_url=proxies['https'],
             )
-            return response.status_code in (200, 301, 302, 303, 307, 308)
-        except:
+            ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+            
+            # Actually try to list transcripts - this is the real test
+            transcript_list = ytt_api.list(TEST_VIDEO_ID)
+            
+            # If we got here without error, the proxy works for YouTube transcripts
+            logger.debug(f"Proxy {proxy_addr} validated successfully (can fetch transcripts)")
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Proxy {proxy_addr} failed transcript validation: {type(e).__name__}")
             return False
 
     def _validate_batch(self, batch_size: int = 30):
@@ -136,7 +161,8 @@ class ProxyManager:
             
             validated = 0
             for proxy in batch:
-                if len(self.ready_proxies) >= self.ready_proxies.maxlen:
+                max_len = self.ready_proxies.maxlen or 30
+                if len(self.ready_proxies) >= max_len:
                     break
                     
                 if self._validate_proxy(proxy):
@@ -179,6 +205,31 @@ class ProxyManager:
             threading.Thread(target=self._validate_batch, daemon=True).start()
         
         return None
+
+    def get_proxies_for_retry(self, count: int = 3) -> List[Optional[Dict[str, str]]]:
+        """
+        Get multiple proxies for retry attempts.
+        Returns a list that includes None as last item (for direct connection fallback).
+        """
+        proxies = []
+        seen = set()
+        
+        # Get unique proxies from the pool
+        for _ in range(min(count, len(self.ready_proxies))):
+            if self.ready_proxies:
+                proxy = self.ready_proxies[0]
+                self.ready_proxies.rotate(-1)
+                if proxy not in seen:
+                    seen.add(proxy)
+                    proxies.append({
+                        "http": f"http://{proxy}",
+                        "https": f"http://{proxy}",
+                    })
+        
+        # Always include direct connection as last fallback
+        proxies.append(None)
+        
+        return proxies
 
     def mark_proxy_failed(self, proxy_url: str):
         """Mark a proxy as failed (called when a request fails)"""

@@ -17,7 +17,7 @@ import re
 import os
 import shutil
 import logging
-from typing import Optional
+from typing import Optional, Dict, Tuple
 from enum import Enum
 from pathlib import Path
 from app.proxy_manager import proxy_manager
@@ -26,8 +26,8 @@ from app.proxy_manager import proxy_manager
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Cookie file path - configurable via environment variable
-# Default: ./cookies.txt (relative to app) or ~/Downloads/cookies-youtube-com.txt
+# Configuration
+MAX_RETRY_ATTEMPTS = 4  # Number of proxy attempts before failing
 COOKIE_FILE = os.environ.get('YT_COOKIE_FILE', None)
 
 def get_cookie_file() -> Optional[str]:
@@ -214,6 +214,92 @@ def transcript_to_text(transcript: list[dict]) -> str:
     return " ".join(seg['text'] for seg in transcript)
 
 
+def fetch_transcript_with_retry(video_id: str, language: Optional[str] = None) -> Tuple[list[dict], str]:
+    """
+    Fetch transcript with automatic proxy rotation and retry logic.
+    Returns (raw_transcript_data, language_used).
+    Raises appropriate exceptions on failure.
+    """
+    # Get list of proxies to try (includes None for direct connection)
+    proxies_to_try = proxy_manager.get_proxies_for_retry(count=MAX_RETRY_ATTEMPTS - 1)
+    
+    last_error = None
+    errors_by_proxy = []
+    
+    for i, proxies in enumerate(proxies_to_try):
+        proxy_url = proxies['https'] if proxies else None
+        proxy_desc = proxy_url or "direct connection"
+        
+        try:
+            logger.info(f"Attempt {i+1}/{len(proxies_to_try)}: Fetching transcript using {proxy_desc}")
+            
+            # Create API instance with or without proxy
+            if proxies:
+                proxy_config = GenericProxyConfig(
+                    http_url=proxies['http'],
+                    https_url=proxies['https'],
+                )
+                ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+            else:
+                ytt_api = YouTubeTranscriptApi()
+            
+            transcript_list = ytt_api.list(video_id)
+            
+            # Find best transcript
+            transcript = None
+            lang_used = None
+            
+            if language:
+                try:
+                    transcript = transcript_list.find_transcript([language])
+                    lang_used = language
+                except NoTranscriptFound:
+                    for t in transcript_list:
+                        if t.is_translatable:
+                            transcript = t.translate(language)
+                            lang_used = language
+                            break
+            
+            if transcript is None:
+                try:
+                    transcript = transcript_list.find_transcript(['en'])
+                    lang_used = 'en'
+                except NoTranscriptFound:
+                    for t in transcript_list:
+                        transcript = t
+                        lang_used = t.language_code
+                        break
+            
+            if transcript is None:
+                raise NoTranscriptFound(video_id, [], None)
+            
+            # Fetch and convert
+            fetched = transcript.fetch()
+            data = fetched.to_raw_data()
+            
+            logger.info(f"Successfully fetched transcript using {proxy_desc}")
+            return data, lang_used or 'unknown'
+            
+        except (TranscriptsDisabled, VideoUnavailable, NoTranscriptFound):
+            # These are video-specific errors, not proxy issues - don't retry
+            raise
+            
+        except Exception as e:
+            last_error = e
+            error_type = type(e).__name__
+            errors_by_proxy.append(f"{proxy_desc}: {error_type}")
+            logger.warning(f"Attempt {i+1} failed with {proxy_desc}: {error_type} - {str(e)[:100]}")
+            
+            # Mark proxy as failed (if it was a proxy)
+            if proxy_url:
+                proxy_manager.mark_proxy_failed(proxy_url)
+    
+    # All attempts failed
+    error_summary = "; ".join(errors_by_proxy)
+    logger.error(f"All {len(proxies_to_try)} attempts failed for video {video_id}: {error_summary}")
+    raise last_error or Exception(f"Failed to fetch transcript after {len(proxies_to_try)} attempts")
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -246,55 +332,9 @@ async def get_transcript(
     # Get metadata
     metadata = get_video_metadata(video_id)
     
-    # Get transcript
-    proxy_url = None
+    # Get transcript with automatic retry and proxy rotation
     try:
-        proxies = proxy_manager.get_proxy()
-        
-        # youtube-transcript-api v1.x uses proxy_config for proxies
-        if proxies:
-            proxy_url = proxies['https']
-            logger.info(f"Using proxy: {proxy_url}")
-            proxy_config = GenericProxyConfig(
-                http_url=proxies['http'],
-                https_url=proxies['https'],
-            )
-            ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
-        else:
-            ytt_api = YouTubeTranscriptApi()
-        
-        transcript_list = ytt_api.list(video_id)
-        
-        transcript = None
-        lang_used = None
-        
-        if language:
-            try:
-                transcript = transcript_list.find_transcript([language])
-                lang_used = language
-            except NoTranscriptFound:
-                for t in transcript_list:
-                    if t.is_translatable:
-                        transcript = t.translate(language)
-                        lang_used = language
-                        break
-        
-        if transcript is None:
-            try:
-                transcript = transcript_list.find_transcript(['en'])
-                lang_used = 'en'
-            except NoTranscriptFound:
-                for t in transcript_list:
-                    transcript = t
-                    lang_used = t.language_code
-                    break
-        
-        if transcript is None:
-            raise HTTPException(status_code=404, detail="No transcript found")
-        
-        fetched = transcript.fetch()
-        # Convert to raw data format for compatibility with formatting functions
-        data = fetched.to_raw_data()
+        data, lang_used = fetch_transcript_with_retry(video_id, language)
         
         if format == OutputFormat.json:
             formatted = [TranscriptSegment(text=s['text'], start=s['start'], duration=s['duration']) for s in data]
@@ -316,11 +356,15 @@ async def get_transcript(
         raise HTTPException(status_code=403, detail="Transcripts disabled for this video")
     except VideoUnavailable:
         raise HTTPException(status_code=404, detail="Video unavailable")
+    except NoTranscriptFound:
+        raise HTTPException(status_code=404, detail="No transcript found for this video")
     except HTTPException:
         raise
     except Exception as e:
-        # Mark proxy as failed on connection/request errors
-        if proxy_url:
-            proxy_manager.mark_proxy_failed(proxy_url)
-            logger.warning(f"Marked proxy as failed: {proxy_url}")
-        raise HTTPException(status_code=500, detail=str(e))
+        error_msg = str(e)
+        if "IP" in error_msg or "block" in error_msg.lower() or "request" in error_msg.lower():
+            raise HTTPException(
+                status_code=503,
+                detail=f"YouTube is blocking requests. All proxy attempts failed: {error_msg}"
+            )
+        raise HTTPException(status_code=500, detail=error_msg)
