@@ -14,6 +14,7 @@ from youtube_transcript_api._errors import (
 import yt_dlp
 import re
 import os
+import shutil
 import logging
 from typing import Optional
 from enum import Enum
@@ -35,12 +36,26 @@ def get_cookie_file() -> Optional[str]:
     
     # Check common locations
     locations = [
-        Path('/app/cookies.txt'),  # Docker mount point (check first)
+        Path('/tmp/cookies.txt'), # Copy to writable location
+        Path('/app/cookies.txt'),  # Docker mount point
         Path(__file__).parent.parent / 'cookies.txt',  # Project root
         Path(__file__).parent / 'cookies.txt',  # App directory
         Path.home() / 'Downloads' / 'cookies-youtube-com.txt',  # Downloads
     ]
+
+    # Try to copy read-only cookies to writable location if needed
+    ro_cookies = Path('/app/cookies.txt')
+    writable_cookies = Path('/tmp/cookies.txt')
     
+    if ro_cookies.exists() and not writable_cookies.exists():
+        try:
+            import shutil
+            shutil.copy(ro_cookies, writable_cookies)
+            logger.info(f"Copied read-only cookies to writable location: {writable_cookies}")
+            return str(writable_cookies)
+        except Exception as e:
+            logger.warning(f"Failed to copy cookies to writable location: {e}")
+
     for loc in locations:
         logger.info(f"Checking for cookies at: {loc}")
         if loc.exists():
