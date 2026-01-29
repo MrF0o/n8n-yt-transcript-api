@@ -1,0 +1,33 @@
+# Environment
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Docker volumes (local)
+postgres_data/
+n8n_data/
+caddy_data/
+caddy_config/
+
+# OS
+.DS_Store
+Thumbs.db
