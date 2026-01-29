@@ -7,6 +7,9 @@
 cookies.txt
 cookies*.txt
 
+# Proxies (sensitive - do not commit)
+proxies.txt
+
 # Python
 __pycache__/
 *.py[cod]

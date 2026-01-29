@@ -6,6 +6,7 @@ services:
       - "8000:8000"
     volumes:
       - ./cookies.txt:/app/cookies.txt
+      - ./proxies.txt:/app/proxies.txt
     networks:
       - n8n-network
     healthcheck:

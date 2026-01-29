@@ -17,6 +17,8 @@ import re
 import os
 import shutil
 import logging
+import requests
+from http.cookiejar import MozillaCookieJar
 from typing import Optional, Dict, Tuple
 from enum import Enum
 from pathlib import Path
@@ -59,13 +61,31 @@ def get_cookie_file() -> Optional[str]:
             logger.warning(f"Failed to copy cookies to writable location: {e}")
 
     for loc in locations:
-        logger.info(f"Checking for cookies at: {loc}")
         if loc.exists():
             logger.info(f"Found cookie file at: {loc}")
             return str(loc)
     
     logger.warning("No cookie file found - YouTube may require authentication")
     return None
+
+
+def create_session_with_cookies(cookie_file: Optional[str] = None) -> requests.Session:
+    """Create a requests.Session with YouTube cookies loaded from Netscape format file"""
+    session = requests.Session()
+    
+    if cookie_file is None:
+        cookie_file = get_cookie_file()
+    
+    if cookie_file and Path(cookie_file).exists():
+        try:
+            cookie_jar = MozillaCookieJar(cookie_file)
+            cookie_jar.load(ignore_discard=True, ignore_expires=True)
+            session.cookies.update(cookie_jar)
+            logger.info(f"Loaded {len(cookie_jar)} cookies from {cookie_file}")
+        except Exception as e:
+            logger.warning(f"Failed to load cookies from {cookie_file}: {e}")
+    
+    return session
 
 
 app = FastAPI(
@@ -138,11 +158,9 @@ def get_video_metadata(video_id: str) -> VideoMetadata:
     
     # Add proxy if available
     proxies = proxy_manager.get_proxy()
-    proxy_url = None
     if proxies:
-        proxy_url = proxies['https']
-        ydl_opts['proxy'] = proxy_url
-        logger.info(f"Using proxy for metadata: {proxy_url}")
+        ydl_opts['proxy'] = proxies['https']
+        logger.info(f"Using proxy for metadata: {proxy_manager.get_stats().get('proxy_url', 'configured')}")
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -162,10 +180,6 @@ def get_video_metadata(video_id: str) -> VideoMetadata:
                 tags=info.get('tags'),
             )
     except Exception as e:
-        # Mark proxy as failed if we used one
-        if proxy_url:
-            proxy_manager.mark_proxy_failed(proxy_url)
-            logger.warning(f"Marked proxy as failed: {proxy_url}")
         raise HTTPException(status_code=404, detail=f"Could not fetch video metadata: {str(e)}")
 
 
@@ -217,11 +231,15 @@ def transcript_to_text(transcript: list[dict]) -> str:
 def fetch_transcript_with_retry(video_id: str, language: Optional[str] = None) -> Tuple[list[dict], str]:
     """
     Fetch transcript with automatic proxy rotation and retry logic.
+    Uses cookies for authenticated requests when available.
     Returns (raw_transcript_data, language_used).
     Raises appropriate exceptions on failure.
     """
     # Get list of proxies to try (includes None for direct connection)
     proxies_to_try = proxy_manager.get_proxies_for_retry(count=MAX_RETRY_ATTEMPTS - 1)
+    
+    # Create session with cookies for authenticated requests
+    cookie_file = get_cookie_file()
     
     last_error = None
     errors_by_proxy = []
@@ -229,19 +247,23 @@ def fetch_transcript_with_retry(video_id: str, language: Optional[str] = None) -
     for i, proxies in enumerate(proxies_to_try):
         proxy_url = proxies['https'] if proxies else None
         proxy_desc = proxy_url or "direct connection"
+        cookie_desc = "(with cookies)" if cookie_file else "(no cookies)"
         
         try:
-            logger.info(f"Attempt {i+1}/{len(proxies_to_try)}: Fetching transcript using {proxy_desc}")
+            logger.info(f"Attempt {i+1}/{len(proxies_to_try)}: Fetching transcript using {proxy_desc} {cookie_desc}")
             
-            # Create API instance with or without proxy
+            # Create fresh session with cookies for each attempt
+            http_session = create_session_with_cookies(cookie_file)
+            
+            # Create API instance with session (for cookies) and optional proxy
             if proxies:
                 proxy_config = GenericProxyConfig(
                     http_url=proxies['http'],
                     https_url=proxies['https'],
                 )
-                ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+                ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config, http_client=http_session)
             else:
-                ytt_api = YouTubeTranscriptApi()
+                ytt_api = YouTubeTranscriptApi(http_client=http_session)
             
             transcript_list = ytt_api.list(video_id)
             
@@ -277,7 +299,7 @@ def fetch_transcript_with_retry(video_id: str, language: Optional[str] = None) -
             fetched = transcript.fetch()
             data = fetched.to_raw_data()
             
-            logger.info(f"Successfully fetched transcript using {proxy_desc}")
+            logger.info(f"Successfully fetched transcript using {proxy_desc} {cookie_desc}")
             return data, lang_used or 'unknown'
             
         except (TranscriptsDisabled, VideoUnavailable, NoTranscriptFound):
