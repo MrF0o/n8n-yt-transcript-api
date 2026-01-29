@@ -13,8 +13,32 @@ from youtube_transcript_api._errors import (
 )
 import yt_dlp
 import re
+import os
 from typing import Optional
 from enum import Enum
+from pathlib import Path
+
+# Cookie file path - configurable via environment variable
+# Default: ./cookies.txt (relative to app) or ~/Downloads/cookies-youtube-com.txt
+COOKIE_FILE = os.environ.get('YT_COOKIE_FILE', None)
+
+def get_cookie_file() -> Optional[str]:
+    """Find available cookie file"""
+    if COOKIE_FILE and Path(COOKIE_FILE).exists():
+        return COOKIE_FILE
+    
+    # Check common locations
+    locations = [
+        Path(__file__).parent.parent / 'cookies.txt',  # Project root
+        Path(__file__).parent / 'cookies.txt',  # App directory
+        Path.home() / 'Downloads' / 'cookies-youtube-com.txt',  # Downloads
+        Path('/app/cookies.txt'),  # Docker/VPS common location
+    ]
+    
+    for loc in locations:
+        if loc.exists():
+            return str(loc)
+    return None
 
 
 app = FastAPI(
@@ -79,6 +103,11 @@ def get_video_metadata(video_id: str) -> VideoMetadata:
         'extract_flat': False,
         'skip_download': True,
     }
+    
+    # Add cookies if available
+    cookie_file = get_cookie_file()
+    if cookie_file:
+        ydl_opts['cookiefile'] = cookie_file
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
