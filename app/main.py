@@ -6,6 +6,7 @@ Returns transcript with video metadata
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import GenericProxyConfig
 from youtube_transcript_api._errors import (
     TranscriptsDisabled,
     NoTranscriptFound,
@@ -19,6 +20,7 @@ import logging
 from typing import Optional
 from enum import Enum
 from pathlib import Path
+from app.proxy_manager import proxy_manager
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -134,6 +136,14 @@ def get_video_metadata(video_id: str) -> VideoMetadata:
     if cookie_file:
         ydl_opts['cookiefile'] = cookie_file
     
+    # Add proxy if available
+    proxies = proxy_manager.get_proxy()
+    proxy_url = None
+    if proxies:
+        proxy_url = proxies['https']
+        ydl_opts['proxy'] = proxy_url
+        logger.info(f"Using proxy for metadata: {proxy_url}")
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
@@ -152,6 +162,10 @@ def get_video_metadata(video_id: str) -> VideoMetadata:
                 tags=info.get('tags'),
             )
     except Exception as e:
+        # Mark proxy as failed if we used one
+        if proxy_url:
+            proxy_manager.mark_proxy_failed(proxy_url)
+            logger.warning(f"Marked proxy as failed: {proxy_url}")
         raise HTTPException(status_code=404, detail=f"Could not fetch video metadata: {str(e)}")
 
 
@@ -205,6 +219,12 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/proxy-stats")
+async def proxy_stats():
+    """Get current proxy pool statistics"""
+    return proxy_manager.get_stats()
+
+
 @app.get("/transcript/{video_id}", response_model=TranscriptResponse)
 async def get_transcript(
     video_id: str,
@@ -227,8 +247,22 @@ async def get_transcript(
     metadata = get_video_metadata(video_id)
     
     # Get transcript
+    proxy_url = None
     try:
-        ytt_api = YouTubeTranscriptApi()
+        proxies = proxy_manager.get_proxy()
+        
+        # youtube-transcript-api v1.x uses proxy_config for proxies
+        if proxies:
+            proxy_url = proxies['https']
+            logger.info(f"Using proxy: {proxy_url}")
+            proxy_config = GenericProxyConfig(
+                http_url=proxies['http'],
+                https_url=proxies['https'],
+            )
+            ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+        else:
+            ytt_api = YouTubeTranscriptApi()
+        
         transcript_list = ytt_api.list(video_id)
         
         transcript = None
@@ -285,4 +319,8 @@ async def get_transcript(
     except HTTPException:
         raise
     except Exception as e:
+        # Mark proxy as failed on connection/request errors
+        if proxy_url:
+            proxy_manager.mark_proxy_failed(proxy_url)
+            logger.warning(f"Marked proxy as failed: {proxy_url}")
         raise HTTPException(status_code=500, detail=str(e))
