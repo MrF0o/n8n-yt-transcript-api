@@ -3,4 +3,7 @@ uvicorn[standard]>=0.32.0
 youtube-transcript-api>=1.0.0,<2.0.0
 yt-dlp>=2025.12.8
 pydantic>=2.10.0
+markitdown
+markitdown[pdf]
+python-multipart
 requests

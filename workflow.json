@@ -1,0 +1,268 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "triggerOn": "specificFolder",
+        "folderToWatch": {
+          "__rl": true,
+          "value": "1_NHVL2ovmg5qlLno14HyCeFAoBF-DH2t",
+          "mode": "list",
+          "cachedResultName": "PDF To Markdown",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/1_NHVL2ovmg5qlLno14HyCeFAoBF-DH2t"
+        },
+        "event": "fileCreated",
+        "options": {}
+      },
+      "id": "ecf1d880-dc34-4fd6-a5a6-e02c7badf85c",
+      "name": "Watch for New Files",
+      "type": "n8n-nodes-base.googleDriveTrigger",
+      "typeVersion": 1,
+      "position": [
+        -5232,
+        3056
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "of7OF78NgVy0ZtlF",
+          "name": "Google Drive account"
+        }
+      },
+      "notes": "Configure: Replace YOUR_FOLDER_ID_HERE with your Google Drive folder ID"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.mimeType }}",
+              "value2": "application/pdf",
+              "operation": "equals"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "5ebcf666-ca0f-4a0c-b332-d95ccfebcb27",
+      "name": "Is PDF File?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -4976,
+        3056
+      ],
+      "notes": "Filter: Only process PDF files"
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.id }}"
+        },
+        "options": {}
+      },
+      "id": "c3042b9e-1902-41bf-9417-0b50fc735229",
+      "name": "Download PDF",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -4768,
+        2880
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "of7OF78NgVy0ZtlF",
+          "name": "Google Drive account"
+        }
+      },
+      "notes": "Downloads the PDF file from Google Drive"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://yt-transcript-api:8000/convert/markdown",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "bd502e3a-badd-451a-8e77-7bb34fe1a593",
+      "name": "Convert PDF to Markdown",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -4528,
+        2880
+      ],
+      "notes": "Sends PDF to Python API, returns plain markdown text"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nfor (const item of items) {\n  const originalName = $('Download PDF').first().json.name;\n  const folderId = $('Watch for New Files').first().json.parents[0];\n  const markdownContent = item.json.data;\n  \n  item.json.markdown_filename = originalName.replace(/\\.pdf$/i, '.md');\n  item.json.folder_id = folderId;\n  item.json.markdown_content = markdownContent;\n}\n\nreturn items;"
+      },
+      "id": "79f770ab-a3e1-458a-8706-3608b2bc4080",
+      "name": "Prepare Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -4320,
+        2880
+      ],
+      "notes": "Prepares filename and extracts data for upload"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nfor (const item of items) {\n  const content = item.json.markdown_content;\n  const filename = item.json.markdown_filename;\n  \n  item.binary = {\n    data: await this.helpers.prepareBinaryData(\n      Buffer.from(content, 'utf-8'),\n      filename,\n      'text/markdown'\n    )\n  };\n}\n\nreturn items;"
+      },
+      "id": "2b393412-dcb1-427b-80f7-a590ab8f47d4",
+      "name": "Create Markdown File",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -4112,
+        2880
+      ],
+      "notes": "Converts markdown text to binary file for upload"
+    },
+    {
+      "parameters": {
+        "name": "={{ $json.markdown_filename }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.folder_id }}"
+        },
+        "options": {}
+      },
+      "id": "8d5eaedc-d7aa-4881-8a29-78c2bec60311",
+      "name": "Upload Markdown",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -3872,
+        2880
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "of7OF78NgVy0ZtlF",
+          "name": "Google Drive account"
+        }
+      },
+      "notes": "Uploads the markdown file to the same folder"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -4816,
+        3280
+      ],
+      "id": "fd8dab3b-c6c3-41f6-8edc-4ffc3cd07e11",
+      "name": "No Operation, do nothing1"
+    }
+  ],
+  "connections": {
+    "Watch for New Files": {
+      "main": [
+        [
+          {
+            "node": "Is PDF File?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is PDF File?": {
+      "main": [
+        [
+          {
+            "node": "Download PDF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Operation, do nothing1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download PDF": {
+      "main": [
+        [
+          {
+            "node": "Convert PDF to Markdown",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert PDF to Markdown": {
+      "main": [
+        [
+          {
+            "node": "Prepare Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Data": {
+      "main": [
+        [
+          {
+            "node": "Create Markdown File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Markdown File": {
+      "main": [
+        [
+          {
+            "node": "Upload Markdown",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "450dfaca848d9d1acff2056b6bc7e1dc916e7091d4e867cda1f0d189aeff38f0"
+  }
+}

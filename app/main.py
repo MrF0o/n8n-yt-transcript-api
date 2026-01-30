@@ -3,7 +3,7 @@ YouTube Transcript API
 Returns transcript with video metadata
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.proxies import GenericProxyConfig
@@ -18,6 +18,8 @@ import os
 import shutil
 import logging
 import requests
+import tempfile
+from markitdown import MarkItDown
 from http.cookiejar import MozillaCookieJar
 from typing import Optional, Dict, Tuple
 from enum import Enum
@@ -127,6 +129,13 @@ class TranscriptResponse(BaseModel):
     language: str
     transcript: str | list[TranscriptSegment]
     format: OutputFormat
+
+
+class MarkItDownResponse(BaseModel):
+    title: Optional[str] = None
+    content: str
+    metadata: Optional[Dict] = None
+
 
 
 def extract_video_id(url_or_id: str) -> str:
@@ -390,3 +399,54 @@ async def get_transcript(
                 detail=f"YouTube is blocking requests. All proxy attempts failed: {error_msg}"
             )
         raise HTTPException(status_code=500, detail=error_msg)
+
+
+@app.post("/convert/markdown", response_model=MarkItDownResponse)
+async def convert_to_markdown(
+    file: Optional[UploadFile] = File(None),
+    url: Optional[str] = Form(None),
+):
+    """
+    Convert a file or URL to Markdown using Microsoft's MarkItDown.
+    
+    - **file**: Upload a file (PDF, DOCX, etc.)
+    - **url**: OR provide a URL
+    """
+    if not file and not url:
+        raise HTTPException(status_code=400, detail="Either file or url must be provided")
+    
+    if file and url:
+        raise HTTPException(status_code=400, detail="Provide either file OR url, not both")
+
+    md = MarkItDown()
+    
+    try:
+        if file:
+            # Save upload to temp file
+            suffix = Path(file.filename).suffix if file.filename else ""
+            if not suffix and file.content_type:
+                 if "pdf" in file.content_type: suffix = ".pdf"
+                 elif "word" in file.content_type: suffix = ".docx"
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                shutil.copyfileobj(file.file, tmp)
+                tmp_path = tmp.name
+            
+            try:
+                result = md.convert(tmp_path)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+        else:
+            # URL conversion
+            result = md.convert(url)
+
+        return MarkItDownResponse(
+            title=result.title,
+            content=result.text_content,
+            metadata={} 
+        )
+            
+    except Exception as e:
+        logger.error(f"MarkItDown conversion failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")

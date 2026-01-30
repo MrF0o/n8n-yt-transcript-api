@@ -47,6 +47,24 @@ curl "http://localhost:8000/transcript/dQw4w9WgXcQ?format=text"
 }
 ```
 
+## Convert to Markdown
+
+Convert files or URLs to Markdown using [Microsoft MarkItDown](https://github.com/microsoft/markitdown).
+
+### Usage
+
+**Convert URL:**
+```bash
+curl -X POST "http://localhost:8000/convert/markdown" \
+     -F "url=https://en.wikipedia.org/wiki/Microsoft"
+```
+
+**Convert File:**
+```bash
+curl -X POST "http://localhost:8000/convert/markdown" \
+     -F "file=@/path/to/document.pdf"
+```
+
 ## n8n HTTP Request Node
 
 - **URL**: `http://yt-transcript-api:8000/transcript/{{ $json.video_id }}`
