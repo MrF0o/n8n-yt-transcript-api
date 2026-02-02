@@ -3,7 +3,7 @@ YouTube Transcript API
 Returns transcript with video metadata
 """
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
 from pydantic import BaseModel, Field
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.proxies import GenericProxyConfig
@@ -21,10 +21,19 @@ import requests
 import tempfile
 from markitdown import MarkItDown
 from http.cookiejar import MozillaCookieJar
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, List
 from enum import Enum
 from pathlib import Path
 from app.proxy_manager import proxy_manager
+from app.video_processor import (
+    convert_video_to_markdown as process_video,
+    is_video_file,
+    is_audio_file,
+    is_media_file,
+    VIDEO_EXTENSIONS,
+    AUDIO_EXTENSIONS,
+    WhisperModel,
+)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -450,3 +459,132 @@ async def convert_to_markdown(
     except Exception as e:
         logger.error(f"MarkItDown conversion failed: {e}")
         raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
+
+
+class VideoMetadataResponse(BaseModel):
+    """Video file metadata"""
+    filename: str
+    duration: float
+    duration_human: str
+    resolution: Optional[str] = None
+    fps: Optional[float] = None
+    file_size_mb: Optional[float] = None
+
+
+class VideoToMarkdownResponse(BaseModel):
+    """Response from video to markdown conversion"""
+    metadata: VideoMetadataResponse
+    language: str
+    content: str
+
+
+class SupportedFormatsResponse(BaseModel):
+    """Lists supported video and audio formats"""
+    video_extensions: List[str]
+    audio_extensions: List[str]
+
+
+@app.get("/convert/video/formats", response_model=SupportedFormatsResponse)
+async def get_supported_formats():
+    """Get list of supported video and audio formats."""
+    return SupportedFormatsResponse(
+        video_extensions=sorted(VIDEO_EXTENSIONS),
+        audio_extensions=sorted(AUDIO_EXTENSIONS)
+    )
+
+
+@app.post("/convert/video-to-markdown", response_model=VideoToMarkdownResponse)
+async def convert_video_to_markdown(
+    file: UploadFile = File(..., description="Video or audio file to convert"),
+    model: WhisperModel = Query(
+        default=WhisperModel.TINY,
+        description="Whisper model: tiny (~1GB RAM), base (~1.5GB), small (~2GB)"
+    ),
+    language: Optional[str] = Query(
+        default=None,
+        description="Language code (e.g. 'en'). Auto-detect if not set."
+    ),
+):
+    """
+    Convert a video or audio file to Markdown transcript.
+    
+    Uses faster-whisper for transcription (optimized for low RAM).
+    
+    **Models (for 2GB RAM VPS, use tiny):**
+    - tiny: ~1GB RAM, fastest
+    - base: ~1.5GB RAM
+    - small: ~2GB RAM (might be tight)
+    
+    Supported formats:
+    - **Video:** MKV, MP4, AVI, MOV, WebM, etc.
+    - **Audio:** MP3, WAV, FLAC, AAC, OGG, etc.
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+    
+    if not is_media_file(file.filename):
+        supported = sorted(VIDEO_EXTENSIONS | AUDIO_EXTENSIONS)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported format. Supported: {', '.join(supported)}"
+        )
+    
+    suffix = Path(file.filename).suffix.lower()
+    
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            logger.info(f"Receiving file: {file.filename}")
+            shutil.copyfileobj(file.file, tmp)
+            tmp_path = tmp.name
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
+    
+    try:
+        result = process_video(tmp_path, model=model.value, language=language)
+        
+        metadata = result.metadata
+        
+        # Format resolution
+        resolution_str = None
+        if metadata.resolution:
+            resolution_str = f"{metadata.resolution[0]}x{metadata.resolution[1]}"
+        
+        # Format file size
+        file_size_mb = None
+        if metadata.file_size:
+            file_size_mb = round(metadata.file_size / (1024 * 1024), 2)
+        
+        # Format duration
+        hours = int(metadata.duration // 3600)
+        minutes = int((metadata.duration % 3600) // 60)
+        secs = int(metadata.duration % 60)
+        if hours > 0:
+            duration_human = f"{hours}h {minutes}m {secs}s"
+        elif minutes > 0:
+            duration_human = f"{minutes}m {secs}s"
+        else:
+            duration_human = f"{secs}s"
+        
+        return VideoToMarkdownResponse(
+            metadata=VideoMetadataResponse(
+                filename=metadata.filename,
+                duration=metadata.duration,
+                duration_human=duration_human,
+                resolution=resolution_str,
+                fps=metadata.fps,
+                file_size_mb=file_size_mb
+            ),
+            language=result.language,
+            content=result.content
+        )
+        
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Video conversion failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
