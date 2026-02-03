@@ -34,6 +34,15 @@ from app.video_processor import (
     AUDIO_EXTENSIONS,
     WhisperModel,
 )
+from app.course_scraper import (
+    COURSES,
+    scrape_course,
+    scrape_all_courses,
+    get_flat_video_list,
+    ScrapeResponse,
+    CourseVideos,
+    CoursesListResponse,
+)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -101,8 +110,8 @@ def create_session_with_cookies(cookie_file: Optional[str] = None) -> requests.S
 
 app = FastAPI(
     title="YouTube Transcript API",
-    description="Get YouTube video transcripts with metadata",
-    version="1.0.0",
+    description="Get YouTube video transcripts with metadata, and scrape course videos for n8n workflows",
+    version="1.1.0",
 )
 
 
@@ -505,20 +514,7 @@ async def convert_video_to_markdown(
         description="Language code (e.g. 'en'). Auto-detect if not set."
     ),
 ):
-    """
-    Convert a video or audio file to Markdown transcript.
-    
-    Uses faster-whisper for transcription (optimized for low RAM).
-    
-    **Models (for 2GB RAM VPS, use tiny):**
-    - tiny: ~1GB RAM, fastest
-    - base: ~1.5GB RAM
-    - small: ~2GB RAM (might be tight)
-    
-    Supported formats:
-    - **Video:** MKV, MP4, AVI, MOV, WebM, etc.
-    - **Audio:** MP3, WAV, FLAC, AAC, OGG, etc.
-    """
+
     if not file.filename:
         raise HTTPException(status_code=400, detail="Filename is required")
     
@@ -588,3 +584,106 @@ async def convert_video_to_markdown(
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+# ============================================================================
+# COURSE SCRAPER ENDPOINTS (for n8n integration)
+# ============================================================================
+
+@app.get("/courses", response_model=CoursesListResponse, tags=["Course Scraper"])
+async def list_courses():
+    """
+    List all available courses that can be scraped.
+    
+    Returns course keys and their names for use with other endpoints.
+    """
+    return CoursesListResponse(courses=COURSES)
+
+
+@app.get("/courses/scrape", response_model=ScrapeResponse, tags=["Course Scraper"])
+async def scrape_courses(
+    course: Optional[str] = Query(
+        None,
+        description="Specific course key to scrape (scaling, offers, leads, money). If not provided, scrapes all."
+    )
+):
+    """
+    Scrape video URLs from acquisition.com courses.
+    
+    Returns detailed information about videos found on each page,
+    organized by course and page.
+    
+    **Use cases:**
+    - Get all video URLs for a specific course
+    - Discover video sources (HubSpot, Wistia, etc.)
+    - Plan downloads before executing
+    """
+    course_keys = [course] if course else None
+    return scrape_all_courses(course_keys)
+
+
+@app.get("/courses/videos", tags=["Course Scraper"])
+async def get_videos_for_n8n(
+    course: Optional[str] = Query(
+        None,
+        description="Specific course key (scaling, offers, leads, money). If not provided, returns all."
+    ),
+    direct_only: bool = Query(
+        True,
+        description="Only return direct download URLs (MP4s), skip embeds"
+    )
+):
+    """
+    Get a flat list of videos optimized for n8n workflow processing.
+    
+    Returns an array of video objects that n8n can iterate over directly.
+    Each object contains:
+    - `video_url`: The URL to download
+    - `course_name`: Folder name for Google Drive organization  
+    - `filename`: Suggested filename (e.g., "01-intro.mp4")
+    - `video_type`: "direct" (downloadable) or "embed" (requires extraction)
+    - `source`: Video host (hubspot, wistia, vimeo, youtube)
+    
+    **n8n Usage:**
+    1. HTTP Request node calls this endpoint
+    2. Split In Batches processes each video
+    3. HTTP Request downloads video_url  
+    4. Google Drive uploads to course_name folder with filename
+    """
+    course_keys = [course] if course else None
+    videos = get_flat_video_list(course_keys)
+    
+    if direct_only:
+        videos = [v for v in videos if v["video_type"] == "direct"]
+    
+    return {
+        "total": len(videos),
+        "videos": videos
+    }
+
+
+@app.get("/courses/{course_key}", response_model=CourseVideos, tags=["Course Scraper"])
+async def scrape_single_course(course_key: str):
+    """
+    Scrape videos from a specific course.
+    
+    **Available courses:**
+    - `scaling`: Scaling Course (13 lessons)
+    - `offers`: Offers Course (11 lessons)  
+    - `leads`: Leads Course (19 lessons)
+    - `money`: Money Models Course (13+ lessons, auto-discovers new pages)
+    """
+    if course_key not in COURSES:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Course '{course_key}' not found. Available: {list(COURSES.keys())}"
+        )
+    
+    from app.course_scraper import get_session
+    session = get_session()
+    result = scrape_course(course_key, session)
+    
+    if not result:
+        raise HTTPException(status_code=500, detail="Failed to scrape course")
+    
+    return result

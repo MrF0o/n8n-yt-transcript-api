@@ -40,3 +40,4 @@ caddy_config/
 Thumbs.db
 
 workflow.json
+workflow-*.json

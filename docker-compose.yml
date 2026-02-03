@@ -14,6 +14,15 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+        reservations:
+          memory: 512M
+    environment:
+      - OMP_NUM_THREADS=1
+      - CT2_FORCE_CPU_ONLY=1
 
 networks:
   n8n-network:
